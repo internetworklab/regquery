@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -59,8 +60,16 @@ func (p *Profile) String() string {
 	return string(p.originContent)
 }
 
-func (p *Profile) MarshalYAML() ([]byte, error) {
-	return yaml.Marshal(p.Dump())
+func (p *Profile) MarshalYAML() (interface{}, error) {
+	stringsBuf := bytes.NewBufferString("")
+	dec := yaml.NewEncoder(stringsBuf)
+	dec.SetIndent(2)
+	dec.Encode(p.Dump())
+	contentB, err := io.ReadAll(stringsBuf)
+	if err != nil {
+		return nil, err
+	}
+	return string(contentB), nil
 }
 
 func (p *Profile) MarshalJSON() ([]byte, error) {
