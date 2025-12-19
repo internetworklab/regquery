@@ -17,6 +17,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/google/btree"
+	"gopkg.in/yaml.v3"
 )
 
 type IPInfoLikeResponse struct {
@@ -31,7 +32,12 @@ type IPInfoLikeResponse struct {
 }
 
 type Profile struct {
-	data map[string][]string
+	data          map[string][]string
+	originContent []byte
+}
+
+func (p *Profile) String() string {
+	return string(p.originContent)
 }
 
 func (p *Profile) Dump() map[string][]string {
@@ -55,14 +61,20 @@ func (p *Profile) GetFirst(key string) *string {
 }
 
 func ParseProfile(path string) (*Profile, error) {
+	result := new(Profile)
+	result.data = make(map[string][]string)
+
+	var err error = nil
+	result.originContent, err = os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-
-	result := new(Profile)
-	result.data = make(map[string][]string)
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -79,6 +91,7 @@ func ParseProfile(path string) (*Profile, error) {
 			result.data[group1] = append(result.data[group1], group2)
 		}
 	}
+
 	return result, nil
 }
 
@@ -88,6 +101,37 @@ type ServeCmd struct {
 
 type ErrResponse struct {
 	Err string `json:"err"`
+}
+
+type Formattable interface {
+	String() string
+}
+
+func encResp(req *http.Request, w http.ResponseWriter, resp interface{}) error {
+	accept := req.Header.Get("Accept")
+	if accept == "" {
+		accept = req.URL.Query().Get("accept")
+	}
+	if accept == "" {
+		accept = "application/json"
+	}
+
+	if strings.HasPrefix(accept, "application/json") {
+		return json.NewEncoder(w).Encode(resp)
+	}
+	if strings.HasPrefix(accept, "text/plain") {
+		if s, ok := resp.(string); ok {
+			fmt.Fprintf(w, "%s", s)
+		}
+		if f, ok := resp.(Formattable); ok {
+			fmt.Fprintf(w, "%s", f.String())
+		}
+		return json.NewEncoder(w).Encode(resp)
+	}
+	if strings.HasPrefix(accept, "application/yaml") {
+		return yaml.NewEncoder(w).Encode(resp)
+	}
+	return json.NewEncoder(w).Encode(resp)
 }
 
 func (s *ServeCmd) Run() error {
@@ -133,7 +177,7 @@ func (s *ServeCmd) Run() error {
 		if ipToQuery := r.URL.Query().Get("ip"); ipToQuery != "" {
 			ip, family, err = parseIP(ipToQuery)
 			if err != nil {
-				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 
@@ -151,16 +195,16 @@ func (s *ServeCmd) Run() error {
 				}
 			}
 			if err != nil {
-				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 			if inetres == nil {
-				json.NewEncoder(w).Encode(ErrResponse{Err: "No inetnum resource found for " + ipToQuery})
+				encResp(r, w, ErrResponse{Err: "No inetnum resource found for " + ipToQuery})
 				return
 			}
 			inetNumProfile, err := ParseProfile(inetres.ProfilePath)
 			if err != nil {
-				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 
@@ -189,7 +233,7 @@ func (s *ServeCmd) Run() error {
 					}
 				}
 			}
-			json.NewEncoder(w).Encode(ipinfoResponse)
+			encResp(r, w, ipinfoResponse)
 			return
 		}
 	})
@@ -202,7 +246,7 @@ func (s *ServeCmd) Run() error {
 		if ipToQuery := r.URL.Query().Get("ip"); ipToQuery != "" {
 			ip, family, err = parseIP(ipToQuery)
 			if err != nil {
-				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 
@@ -213,19 +257,19 @@ func (s *ServeCmd) Run() error {
 				inetres, err = inet6NumIndexer.Query(ip, family)
 			}
 			if err != nil {
-				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 			if inetres == nil {
-				json.NewEncoder(w).Encode(ErrResponse{Err: "No inetnum resource found for " + ipToQuery})
+				encResp(r, w, ErrResponse{Err: "No inetnum resource found for " + ipToQuery})
 				return
 			}
 			profile, err := ParseProfile(inetres.ProfilePath)
 			if err != nil {
-				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
-			json.NewEncoder(w).Encode(profile.Dump())
+			encResp(r, w, profile.Dump())
 			return
 		}
 	})
