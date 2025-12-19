@@ -20,15 +20,34 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type ISOCountryCodeRecord struct {
+	Name                   *string `json:"name,omitempty"`
+	Alpha2                 *string `json:"alpha-2,omitempty"`
+	Alpha3                 *string `json:"alpha-3,omitempty"`
+	CountryCode            *string `json:"country-code,omitempty"`
+	ISO31662               *string `json:"iso_3166-2,omitempty"`
+	Region                 *string `json:"region,omitempty"`
+	SubRegion              *string `json:"sub-region,omitempty"`
+	IntermediateRegion     *string `json:"intermediate-region,omitempty"`
+	RegionCode             *string `json:"region-code,omitempty"`
+	SubRegionCode          *string `json:"sub-region-code,omitempty"`
+	IntermediateRegionCode *string `json:"intermediate-region-code,omitempty"`
+}
+
 type IPInfoLikeResponse struct {
 	IP            string  `json:"ip"`
-	ASN           *string `json:"asn"`
-	ASName        *string `json:"as_name"`
-	ASDomain      *string `json:"as_domain"`
-	CountryCode   *string `json:"country_code"`
-	Country       *string `json:"country"`
-	ContinentCode *string `json:"continent_code"`
-	Continent     *string `json:"continent"`
+	ASN           *string `json:"asn,omitempty"`
+	ASName        *string `json:"as_name,omitempty"`
+	ASDomain      *string `json:"as_domain,omitempty"`
+	CountryCode   *string `json:"country_code,omitempty"`
+	Country       *string `json:"country,omitempty"`
+	ContinentCode *string `json:"continent_code,omitempty"`
+	Continent     *string `json:"continent,omitempty"`
+}
+
+func (r *IPInfoLikeResponse) String() string {
+	j, _ := json.Marshal(r)
+	return string(j)
 }
 
 type Profile struct {
@@ -38,6 +57,14 @@ type Profile struct {
 
 func (p *Profile) String() string {
 	return string(p.originContent)
+}
+
+func (p *Profile) MarshalYAML() ([]byte, error) {
+	return yaml.Marshal(p.Dump())
+}
+
+func (p *Profile) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p.Dump())
 }
 
 func (p *Profile) Dump() map[string][]string {
@@ -96,7 +123,8 @@ func ParseProfile(path string) (*Profile, error) {
 }
 
 type ServeCmd struct {
-	RegistryPath string `help:"Path to the registry." type:"path" default:"registry"`
+	RegistryPath           string `help:"Path to the registry." type:"path" default:"registry"`
+	ISOCountryCodeDataPath string `help:"Path to the ISO country code data." type:"path" default:"ISO-3166-Countries-with-Regional-Codes"`
 }
 
 type ErrResponse struct {
@@ -137,10 +165,27 @@ func encResp(req *http.Request, w http.ResponseWriter, resp interface{}) error {
 func (s *ServeCmd) Run() error {
 	log.Printf("Serving queries from %s", s.RegistryPath)
 
+	var isoCountryCodeRecords []ISOCountryCodeRecord = nil
+	isoCountryDataF, err := os.Open(filepath.Join(s.ISOCountryCodeDataPath, "all", "all.json"))
+	if err != nil {
+		return err
+	}
+	if err := json.NewDecoder(isoCountryDataF).Decode(&isoCountryCodeRecords); err != nil {
+		return err
+	}
+
+	isoAlpha2Map := make(map[string][]ISOCountryCodeRecord)
+	for _, record := range isoCountryCodeRecords {
+		key := record.Alpha2
+		if key != nil && *key != "" {
+			isoAlpha2Map[*key] = append(isoAlpha2Map[*key], record)
+		}
+	}
+
 	inet6NumIndexer := new(INetNumIndexer)
 	inet6NumIndexer.ResourceGroups = btree.New(2)
 
-	err := inet6NumIndexer.Index(INetFamilyIPv6, filepath.Join(s.RegistryPath, "data", "inet6num"))
+	err = inet6NumIndexer.Index(INetFamilyIPv6, filepath.Join(s.RegistryPath, "data", "inet6num"))
 	if err != nil {
 		return err
 	}
@@ -208,10 +253,17 @@ func (s *ServeCmd) Run() error {
 				return
 			}
 
-			ipinfoResponse := IPInfoLikeResponse{
+			ipinfoResponse := &IPInfoLikeResponse{
 				IP:          ipToQuery,
 				CountryCode: inetNumProfile.GetFirst("country"),
 			}
+			if ipinfoResponse.CountryCode != nil && *ipinfoResponse.CountryCode != "" {
+				records, ok := isoAlpha2Map[*ipinfoResponse.CountryCode]
+				if ok && len(records) > 0 {
+					ipinfoResponse.Country = records[0].Name
+				}
+			}
+
 			if routeRes != nil {
 				routeProfile, err := ParseProfile(routeRes.ProfilePath)
 				if err == nil && routeProfile != nil {
@@ -269,7 +321,7 @@ func (s *ServeCmd) Run() error {
 				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
-			encResp(r, w, profile.Dump())
+			encResp(r, w, profile)
 			return
 		}
 	})
