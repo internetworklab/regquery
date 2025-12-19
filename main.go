@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -61,6 +62,10 @@ type ServeCmd struct {
 	RegistryPath string `help:"Path to the registry." type:"path" default:"registry"`
 }
 
+type ErrResponse struct {
+	Err string `json:"err"`
+}
+
 func (s *ServeCmd) Run() error {
 	log.Printf("Serving queries from %s", s.RegistryPath)
 
@@ -80,33 +85,54 @@ func (s *ServeCmd) Run() error {
 		return err
 	}
 
-	ipToQuery := "172.20.143.17"
-	ip, family, err := parseIP(ipToQuery)
+	serveMux := http.NewServeMux()
+	serveMux.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
+		var err error = nil
+		var ip net.IP = nil
+		var family INetFamily = INetFamilyUnknown
+
+		if ipToQuery := r.URL.Query().Get("ip"); ipToQuery != "" {
+			ip, family, err = parseIP(ipToQuery)
+			if err != nil {
+				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				return
+			}
+
+			var inetres *INetNumResource = nil
+			if family == INetFamilyIPv4 {
+				inetres, err = inetNumIndexer.Query(ip, family)
+			} else if family == INetFamilyIPv6 {
+				inetres, err = inet6NumIndexer.Query(ip, family)
+			}
+			if err != nil {
+				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				return
+			}
+			if inetres == nil {
+				json.NewEncoder(w).Encode(ErrResponse{Err: "No inetnum resource found for " + ipToQuery})
+				return
+			}
+			profile, err := ParseProfile(inetres.ProfilePath)
+			if err != nil {
+				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				return
+			}
+			json.NewEncoder(w).Encode(profile.Dump())
+			return
+		}
+	})
+
+	server := &http.Server{
+		Handler: serveMux,
+	}
+	listener, err := net.Listen("tcp", ":18080")
 	if err != nil {
 		return err
 	}
+	defer listener.Close()
+	log.Printf("Serving queries on port 18080")
 
-	if family == INetFamilyIPv4 {
-		inetres, err := inetNumIndexer.Query(ip, family)
-		if err != nil {
-			return err
-		}
-		if inetres == nil {
-			log.Printf("No inetnum resource found for %s", ip)
-			return nil
-		}
-		profile, err := ParseProfile(inetres.ProfilePath)
-		if err != nil {
-			return err
-		}
-		profileJ, err := json.Marshal(profile.Dump())
-		if err != nil {
-			return err
-		}
-		log.Printf("Found inetnum resource for %s: %s", ipToQuery, string(profileJ))
-	}
-
-	return err
+	return server.Serve(listener)
 }
 
 type INetFamily int
