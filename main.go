@@ -13,10 +13,22 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/alecthomas/kong"
 	"github.com/google/btree"
 )
+
+type IPInfoLikeResponse struct {
+	IP            string  `json:"ip"`
+	ASN           *string `json:"asn"`
+	ASName        *string `json:"as_name"`
+	ASDomain      *string `json:"as_domain"`
+	CountryCode   *string `json:"country_code"`
+	Country       *string `json:"country"`
+	ContinentCode *string `json:"continent_code"`
+	Continent     *string `json:"continent"`
+}
 
 type Profile struct {
 	data map[string][]string
@@ -28,6 +40,18 @@ func (p *Profile) Dump() map[string][]string {
 		clone[k] = append([]string{}, v...)
 	}
 	return clone
+}
+
+func (p *Profile) GetFirst(key string) *string {
+	if p != nil && p.data != nil {
+		if vals, ok := p.data[key]; ok {
+			if len(vals) > 0 {
+				val := vals[0]
+				return &val
+			}
+		}
+	}
+	return nil
 }
 
 func ParseProfile(path string) (*Profile, error) {
@@ -85,7 +109,91 @@ func (s *ServeCmd) Run() error {
 		return err
 	}
 
+	// for ROA4
+	routeIndexer := new(INetNumIndexer)
+	routeIndexer.ResourceGroups = btree.New(2)
+	err = routeIndexer.Index(INetFamilyIPv4, filepath.Join(s.RegistryPath, "data", "route"))
+	if err != nil {
+		return err
+	}
+
+	// for ROA6
+	route6Indexer := new(INetNumIndexer)
+	route6Indexer.ResourceGroups = btree.New(2)
+	err = route6Indexer.Index(INetFamilyIPv6, filepath.Join(s.RegistryPath, "data", "route6"))
+	if err != nil {
+		return err
+	}
+
 	serveMux := http.NewServeMux()
+	serveMux.HandleFunc("/ipinfo/lite/query", func(w http.ResponseWriter, r *http.Request) {
+		var err error = nil
+		var ip net.IP = nil
+		var family INetFamily = INetFamilyUnknown
+		if ipToQuery := r.URL.Query().Get("ip"); ipToQuery != "" {
+			ip, family, err = parseIP(ipToQuery)
+			if err != nil {
+				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				return
+			}
+
+			var inetres *INetNumResource = nil
+			var routeRes *INetNumResource = nil
+			if family == INetFamilyIPv4 {
+				inetres, err = inetNumIndexer.Query(ip, family)
+				if err == nil {
+					routeRes, err = routeIndexer.Query(ip, family)
+				}
+			} else if family == INetFamilyIPv6 {
+				inetres, err = inet6NumIndexer.Query(ip, family)
+				if err == nil {
+					routeRes, err = route6Indexer.Query(ip, family)
+				}
+			}
+			if err != nil {
+				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				return
+			}
+			if inetres == nil {
+				json.NewEncoder(w).Encode(ErrResponse{Err: "No inetnum resource found for " + ipToQuery})
+				return
+			}
+			inetNumProfile, err := ParseProfile(inetres.ProfilePath)
+			if err != nil {
+				json.NewEncoder(w).Encode(ErrResponse{Err: err.Error()})
+				return
+			}
+
+			ipinfoResponse := IPInfoLikeResponse{
+				IP:          ipToQuery,
+				CountryCode: inetNumProfile.GetFirst("country"),
+			}
+			if routeRes != nil {
+				routeProfile, err := ParseProfile(routeRes.ProfilePath)
+				if err == nil && routeProfile != nil {
+					asn := routeProfile.GetFirst("origin")
+					if asn != nil && *asn != "" {
+						ipinfoResponse.ASN = asn
+
+						asnPattern := regexp.MustCompile(`AS(\d+)`)
+						if ok := asnPattern.MatchString(*asn); ok {
+							asnProfile, err := ParseProfile(filepath.Join(s.RegistryPath, "data", "aut-num", *asn))
+							if err == nil && asnProfile != nil {
+								asnName := asnProfile.GetFirst("as-name")
+								if asnName != nil && *asnName != "" {
+									*asnName = strings.TrimPrefix(*asnName, "AS-")
+									ipinfoResponse.ASName = asnName
+								}
+							}
+						}
+					}
+				}
+			}
+			json.NewEncoder(w).Encode(ipinfoResponse)
+			return
+		}
+	})
+
 	serveMux.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
 		var err error = nil
 		var ip net.IP = nil
