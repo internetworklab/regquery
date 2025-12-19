@@ -282,7 +282,7 @@ func (s *ServeCmd) Run() error {
 					if asn != nil && *asn != "" {
 						ipinfoResponse.ASN = asn
 
-						asnPattern := regexp.MustCompile(`AS(\d+)`)
+						asnPattern := regexp.MustCompile(`^AS(\d+)$`)
 						if ok := asnPattern.MatchString(*asn); ok {
 							asnProfile, err := ParseProfile(filepath.Join(s.RegistryPath, "data", "aut-num", *asn))
 							if err == nil && asnProfile != nil {
