@@ -1,5 +1,5 @@
 [Unit]
-Description=Update registry repository every 6 hours
+Description=Update registry repository UTC 4AM every day
 Documentation=man:systemd.timer(5)
 
 [Timer]
