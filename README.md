@@ -19,7 +19,7 @@ curl --url-query ip=fdda:8ca4:1556:: https://dn42-query.netneighbor.me/query
 curl --url-query ip=fdda:8ca4:1556::a https://dn42-query.netneighbor.me/query
 ```
 
-Query for IPInfo-like response (but much simplified):
+Query for IPInfoLite-like response (but much simplified):
 
 ```shell
 curl --url-query ip=172.20.143.1 https://dn42-query.netneighbor.me/ipinfo/lite/query | jq
