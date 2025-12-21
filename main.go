@@ -134,6 +134,7 @@ func ParseProfile(path string) (*Profile, error) {
 type ServeCmd struct {
 	RegistryPath           string `help:"Path to the registry." type:"path" default:"registry"`
 	ISOCountryCodeDataPath string `help:"Path to the ISO country code data." type:"path" default:"ISO-3166-Countries-with-Regional-Codes"`
+	ListenAddress          string `help:"Address to listen on." type:"string" default:":18080"`
 }
 
 type ErrResponse struct {
@@ -340,12 +341,12 @@ func (s *ServeCmd) Run() error {
 	server := &http.Server{
 		Handler: serveMux,
 	}
-	listener, err := net.Listen("tcp", ":18080")
+	listener, err := net.Listen("tcp", s.ListenAddress)
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
-	log.Printf("Serving queries on port 18080")
+	log.Printf("Serving queries on %s", s.ListenAddress)
 
 	return server.Serve(listener)
 }

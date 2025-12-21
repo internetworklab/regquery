@@ -1,0 +1,15 @@
+services:
+  regquery:
+    container_name: regquery
+    image: ghcr.io/internetworklab/regquery:latest
+    pull_policy: always
+    ports:
+      - "18080:18080"
+    volumes:
+      - "./ISO-3166-Countries-with-Regional-Codes:/app/regquery/ISO-3166-Countries-with-Regional-Codes:ro"
+      - "./registry:/app/regquery/registry:ro"
+      - "./override:/app/regquery/override:ro"
+    command:
+      - "/usr/local/bin/regquery"
+      - "serve"
+      - "--listen-address=:18080"
