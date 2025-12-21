@@ -1,0 +1,7 @@
+# ip cidr -> country code override, in case some db is not accurate enough
+# if multiple override entries match, the most precise one will be used
+overrides:
+  - cidr: 172.20.143.16/28
+    country: DE
+  - cidr: 172.20.143.32/27
+    country: DE
