@@ -1,6 +1,7 @@
 services:
   regquery:
     container_name: regquery
+    working_dir: /app/regquery
     image: ghcr.io/internetworklab/regquery:latest
     pull_policy: always
     ports:
