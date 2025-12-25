@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	pkgutils "example.com/registryquery/pkg/utils"
 	"github.com/alecthomas/kong"
 	"github.com/google/btree"
 	"gopkg.in/yaml.v3"
@@ -283,6 +284,10 @@ func (s *ServeCmd) Run() error {
 
 	serveMux := http.NewServeMux()
 	serveMux.HandleFunc("/ipinfo/lite/query", func(w http.ResponseWriter, r *http.Request) {
+		remoteAddr := pkgutils.GetRemoteAddr(r)
+		log.Printf("Started to serve lite query for %s with raw query: %s", remoteAddr, r.URL.RawQuery)
+		defer log.Printf("Served lite query for %s with raw query: %s", remoteAddr, r.URL.RawQuery)
+
 		var err error = nil
 		var ip net.IP = nil
 		var family INetFamily = INetFamilyUnknown
@@ -358,6 +363,10 @@ func (s *ServeCmd) Run() error {
 	})
 
 	serveMux.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
+		remoteAddr := pkgutils.GetRemoteAddr(r)
+		log.Printf("Started to serve query for %s with raw query: %s", remoteAddr, r.URL.RawQuery)
+		defer log.Printf("Served query for %s with raw query: %s", remoteAddr, r.URL.RawQuery)
+
 		var err error = nil
 		var ip net.IP = nil
 		var family INetFamily = INetFamilyUnknown
