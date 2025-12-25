@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/google/btree"
@@ -136,6 +138,7 @@ type ServeCmd struct {
 	RegistryPath           string `help:"Path to the registry." type:"path" default:"registry"`
 	ISOCountryCodeDataPath string `help:"Path to the ISO country code data." type:"path" default:"ISO-3166-Countries-with-Regional-Codes"`
 	ListenAddress          string `help:"Address to listen on." type:"string" default:":18080"`
+	AutoReIndexInterval    string `help:"Interval to auto re-index the index." type:"string" default:"12h"`
 }
 
 type ErrResponse struct {
@@ -180,6 +183,13 @@ func (s *ServeCmd) Run() error {
 
 	log.Printf("Serving queries from %s", s.RegistryPath)
 
+	var autoReIndexInterval time.Duration
+	var err error = nil
+	autoReIndexInterval, err = time.ParseDuration(s.AutoReIndexInterval)
+	if err != nil {
+		return err
+	}
+
 	var isoCountryCodeRecords []ISOCountryCodeRecord = nil
 	isoCountryDataF, err := os.Open(filepath.Join(s.ISOCountryCodeDataPath, "all", "all.json"))
 	if err != nil {
@@ -201,10 +211,18 @@ func (s *ServeCmd) Run() error {
 		INetFamilyIPv6,
 		filepath.Join(s.RegistryPath, "data", "inet6num"),
 	)
-
 	if err := inet6NumIndexer.Index(ctx); err != nil {
 		return err
 	}
+	go func() {
+		for err := range inet6NumIndexer.AutoReIndex(ctx, autoReIndexInterval) {
+			if err != nil {
+				log.Printf("Error auto re-indexing inet6num index: %v", err)
+			} else {
+				log.Printf("Auto re-indexed inet6num index")
+			}
+		}
+	}()
 
 	inetNumIndexer := NewINetNumIndexer(
 		INetFamilyIPv4,
@@ -215,6 +233,15 @@ func (s *ServeCmd) Run() error {
 	if err != nil {
 		return err
 	}
+	go func() {
+		for err := range inetNumIndexer.AutoReIndex(ctx, autoReIndexInterval) {
+			if err != nil {
+				log.Printf("Error auto re-indexing inetnum index: %v", err)
+			} else {
+				log.Printf("Auto re-indexed inetnum index")
+			}
+		}
+	}()
 
 	// for ROA4
 	routeIndexer := NewINetNumIndexer(
@@ -225,6 +252,15 @@ func (s *ServeCmd) Run() error {
 	if err := routeIndexer.Index(ctx); err != nil {
 		return err
 	}
+	go func() {
+		for err := range routeIndexer.AutoReIndex(ctx, autoReIndexInterval) {
+			if err != nil {
+				log.Printf("Error auto re-indexing route index: %v", err)
+			} else {
+				log.Printf("Auto re-indexed route index")
+			}
+		}
+	}()
 
 	// for ROA6
 	route6Indexer := NewINetNumIndexer(
@@ -235,6 +271,15 @@ func (s *ServeCmd) Run() error {
 	if err := route6Indexer.Index(ctx); err != nil {
 		return err
 	}
+	go func() {
+		for err := range route6Indexer.AutoReIndex(ctx, autoReIndexInterval) {
+			if err != nil {
+				log.Printf("Error auto re-indexing route index: %v", err)
+			} else {
+				log.Printf("Auto re-indexed route6 index")
+			}
+		}
+	}()
 
 	serveMux := http.NewServeMux()
 	serveMux.HandleFunc("/ipinfo/lite/query", func(w http.ResponseWriter, r *http.Request) {
@@ -405,6 +450,8 @@ type INetNumIndexer struct {
 
 	// indexed collection of INetNumResourceGroup
 	ResourceGroups *btree.BTree
+
+	lock sync.Mutex
 }
 
 func NewINetNumIndexer(family INetFamily, dirPath string) *INetNumIndexer {
@@ -412,16 +459,27 @@ func NewINetNumIndexer(family INetFamily, dirPath string) *INetNumIndexer {
 		Family:         family,
 		DirPath:        dirPath,
 		ResourceGroups: btree.New(2),
+		lock:           sync.Mutex{},
 	}
 
 	return indexer
 }
 
-func (indexer *INetNumIndexer) Index(ctx context.Context) error {
-	family := indexer.Family
-	dirPath := indexer.DirPath
+func (indexer *INetNumIndexer) setIndex(index *btree.BTree) {
+	indexer.lock.Lock()
+	defer indexer.lock.Unlock()
+	indexer.ResourceGroups = index
+}
 
-	return filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
+func (indexer *INetNumIndexer) getIndexRef() *btree.BTree {
+	indexer.lock.Lock()
+	defer indexer.lock.Unlock()
+	return indexer.ResourceGroups
+}
+
+func doBuildIndex(family INetFamily, dirPath string) (*btree.BTree, error) {
+	index := btree.New(2)
+	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			log.Printf("Error walking %s: %v", path, err)
 			return nil
@@ -448,11 +506,11 @@ func (indexer *INetNumIndexer) Index(ctx context.Context) error {
 		}
 		prefix := d.Name()[:len(d.Name())-len(matches[0])]
 
-		if !indexer.ResourceGroups.Has(&INetNumResourceGroup{PrefixLen: maskLen}) {
-			indexer.ResourceGroups.ReplaceOrInsert(&INetNumResourceGroup{PrefixLen: maskLen, Resources: btree.New(2)})
+		if !index.Has(&INetNumResourceGroup{PrefixLen: maskLen}) {
+			index.ReplaceOrInsert(&INetNumResourceGroup{PrefixLen: maskLen, Resources: btree.New(2)})
 		}
 
-		group := indexer.ResourceGroups.Get(&INetNumResourceGroup{PrefixLen: maskLen})
+		group := index.Get(&INetNumResourceGroup{PrefixLen: maskLen})
 		if group == nil {
 			panic("group is nil (impossible)")
 		}
@@ -471,6 +529,41 @@ func (indexer *INetNumIndexer) Index(ctx context.Context) error {
 
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return index, err
+}
+
+func (indexer *INetNumIndexer) Index(ctx context.Context) error {
+	newIndex, err := doBuildIndex(indexer.Family, indexer.DirPath)
+	if err != nil {
+		return err
+	}
+
+	indexer.setIndex(newIndex)
+	return nil
+}
+
+func (indexer *INetNumIndexer) AutoReIndex(ctx context.Context, every time.Duration) <-chan error {
+	errChan := make(chan error)
+	go func() {
+		tick := time.NewTicker(every)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if err := indexer.Index(ctx); err != nil {
+					errChan <- err
+				} else {
+					errChan <- nil
+				}
+			}
+		}
+	}()
+	return errChan
 }
 
 func parseIP(address string) (ip net.IP, family INetFamily, err error) {
@@ -491,8 +584,8 @@ func (indexer *INetNumIndexer) Query(address net.IP, family INetFamily) (*INetNu
 	var result *INetNumResource = new(INetNumResource)
 	var found *bool = new(bool)
 	*found = false
-	indexer.ResourceGroups.Descend(func(item btree.Item) bool {
 
+	indexer.getIndexRef().Descend(func(item btree.Item) bool {
 		resGroup, ok := item.(*INetNumResourceGroup)
 		if !ok {
 			panic("item is not an INetNumResourceGroup (impossible)")
