@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -175,6 +176,8 @@ func encResp(req *http.Request, w http.ResponseWriter, resp interface{}) error {
 }
 
 func (s *ServeCmd) Run() error {
+	ctx := context.Background()
+
 	log.Printf("Serving queries from %s", s.RegistryPath)
 
 	var isoCountryCodeRecords []ISOCountryCodeRecord = nil
@@ -194,35 +197,42 @@ func (s *ServeCmd) Run() error {
 		}
 	}
 
-	inet6NumIndexer := new(INetNumIndexer)
-	inet6NumIndexer.ResourceGroups = btree.New(2)
+	inet6NumIndexer := NewINetNumIndexer(
+		INetFamilyIPv6,
+		filepath.Join(s.RegistryPath, "data", "inet6num"),
+	)
 
-	err = inet6NumIndexer.Index(INetFamilyIPv6, filepath.Join(s.RegistryPath, "data", "inet6num"))
-	if err != nil {
+	if err := inet6NumIndexer.Index(ctx); err != nil {
 		return err
 	}
 
-	inetNumIndexer := new(INetNumIndexer)
-	inetNumIndexer.ResourceGroups = btree.New(2)
+	inetNumIndexer := NewINetNumIndexer(
+		INetFamilyIPv4,
+		filepath.Join(s.RegistryPath, "data", "inetnum"),
+	)
 
-	err = inetNumIndexer.Index(INetFamilyIPv4, filepath.Join(s.RegistryPath, "data", "inetnum"))
+	err = inetNumIndexer.Index(ctx)
 	if err != nil {
 		return err
 	}
 
 	// for ROA4
-	routeIndexer := new(INetNumIndexer)
-	routeIndexer.ResourceGroups = btree.New(2)
-	err = routeIndexer.Index(INetFamilyIPv4, filepath.Join(s.RegistryPath, "data", "route"))
-	if err != nil {
+	routeIndexer := NewINetNumIndexer(
+		INetFamilyIPv4,
+		filepath.Join(s.RegistryPath, "data", "route"),
+	)
+
+	if err := routeIndexer.Index(ctx); err != nil {
 		return err
 	}
 
 	// for ROA6
-	route6Indexer := new(INetNumIndexer)
-	route6Indexer.ResourceGroups = btree.New(2)
-	err = route6Indexer.Index(INetFamilyIPv6, filepath.Join(s.RegistryPath, "data", "route6"))
-	if err != nil {
+	route6Indexer := NewINetNumIndexer(
+		INetFamilyIPv6,
+		filepath.Join(s.RegistryPath, "data", "route6"),
+	)
+
+	if err := route6Indexer.Index(ctx); err != nil {
 		return err
 	}
 
@@ -389,12 +399,28 @@ type INetNumResourceGroup struct {
 }
 
 type INetNumIndexer struct {
+	Family INetFamily
+
+	DirPath string
 
 	// indexed collection of INetNumResourceGroup
 	ResourceGroups *btree.BTree
 }
 
-func (indexer *INetNumIndexer) Index(family INetFamily, dirPath string) error {
+func NewINetNumIndexer(family INetFamily, dirPath string) *INetNumIndexer {
+	indexer := &INetNumIndexer{
+		Family:         family,
+		DirPath:        dirPath,
+		ResourceGroups: btree.New(2),
+	}
+
+	return indexer
+}
+
+func (indexer *INetNumIndexer) Index(ctx context.Context) error {
+	family := indexer.Family
+	dirPath := indexer.DirPath
+
 	return filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			log.Printf("Error walking %s: %v", path, err)
