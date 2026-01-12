@@ -17,6 +17,7 @@ import (
 	"time"
 
 	pkgdn42 "example.com/registryquery/pkg/dn42"
+	pkginigeoip "example.com/registryquery/pkg/inigeoip"
 	pkgiso3166 "example.com/registryquery/pkg/iso3166"
 	pkgutils "example.com/registryquery/pkg/utils"
 	"github.com/alecthomas/kong"
@@ -32,6 +33,19 @@ type IPInfoLikeResponse struct {
 	Country       *string `json:"country,omitempty"`
 	ContinentCode *string `json:"continent_code,omitempty"`
 	Continent     *string `json:"continent,omitempty"`
+}
+
+type IP2LocationLikeResponse struct {
+	IP          *string  `json:"ip,omitempty"`
+	CountryCode *string  `json:"country_code,omitempty"`
+	CountryName *string  `json:"country_name,omitempty"`
+	RegionName  *string  `json:"region_name,omitempty"`
+	CityName    *string  `json:"city_name,omitempty"`
+	Latitude    *float64 `json:"latitude,omitempty"`
+	Longitude   *float64 `json:"longitude,omitempty"`
+	ASN         *string  `json:"asn,omitempty"`
+	AS          *string  `json:"as,omitempty"`
+	IsProxy     *bool    `json:"is_proxy,omitempty"`
 }
 
 func (r *IPInfoLikeResponse) String() string {
@@ -124,6 +138,8 @@ type ServeCmd struct {
 	ISOCountryCodeDataPath string `help:"Path to the ISO country code data." type:"path" default:"ISO-3166-Countries-with-Regional-Codes"`
 	ListenAddress          string `help:"Address to listen on." type:"string" default:":18080"`
 	AutoReIndexInterval    string `help:"Interval to auto re-index the index." type:"string" default:"12h"`
+	GeoIPCacheRefreshIntvSecs int `help:"Interval to refresh the GeoIP cache." type:"int" default:"86400"`
+	INIGeoIPDBPath string `help:"Path to the INI GeoIP database." type:"path" default:"dn42-geoip/data"`
 }
 
 type ErrResponse struct {
@@ -266,7 +282,30 @@ func (s *ServeCmd) Run() error {
 		}
 	}()
 
+
+	geoipCache := pkginigeoip.NewCachedGeoIPMapWrapper(time.Duration(s.GeoIPCacheRefreshIntvSecs)*time.Second, s.INIGeoIPDBPath)
+	geoipCache.Run(ctx)
+
 	serveMux := http.NewServeMux()
+
+	serveMux.HandleFunc("/ip2location/v1/query", func(w http.ResponseWriter, r *http.Request) {
+
+		remoteAddr := pkgutils.GetRemoteAddr(r)
+		log.Printf("Started to serve lite query for %s with raw query: %s", remoteAddr, r.URL.RawQuery)
+		defer log.Printf("Served lite query for %s with raw query: %s", remoteAddr, r.URL.RawQuery)
+
+		geoipMap, err := geoipCache.GetGeoIPMap(ctx)
+		if err != nil {
+			encResp(r, w, ErrResponse{Err: err.Error()})
+			return
+		}
+
+		// todo
+
+
+		fmt.Fprintf(w, "todo")
+	})
+
 	serveMux.HandleFunc("/ipinfo/lite/query", func(w http.ResponseWriter, r *http.Request) {
 		remoteAddr := pkgutils.GetRemoteAddr(r)
 		log.Printf("Started to serve lite query for %s with raw query: %s", remoteAddr, r.URL.RawQuery)

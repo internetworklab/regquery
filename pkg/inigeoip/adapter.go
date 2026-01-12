@@ -1,0 +1,229 @@
+package inigeoip
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"gopkg.in/ini.v1"
+)
+
+type BasicGeoIP struct {
+	Country     *string
+	Region      *string
+	City        *string
+	Latitude    *float64
+	Longitude   *float64
+	CountryCode *string
+}
+
+func (b *BasicGeoIP) String() string {
+	segs := make([]string, 0)
+	if b.Country != nil && *b.Country != "" {
+		segs = append(segs, fmt.Sprintf("country=%s", *b.Country))
+	}
+	if b.Region != nil && *b.Region != "" {
+		segs = append(segs, fmt.Sprintf("region=%s", *b.Region))
+	}
+	if b.City != nil && *b.City != "" {
+		segs = append(segs, fmt.Sprintf("city=%s", *b.City))
+	}
+	if b.Latitude != nil {
+		segs = append(segs, fmt.Sprintf("latitude=%f", *b.Latitude))
+	}
+	if b.Longitude != nil {
+		segs = append(segs, fmt.Sprintf("longitude=%f", *b.Longitude))
+	}
+	return strings.Join(segs, ", ")
+}
+
+func BasicGeoIPFromINISection(section *ini.Section) *BasicGeoIP {
+	if section == nil {
+		return nil
+	}
+
+	var latitude *float64
+	var longitude *float64
+	var country *string
+	var region *string
+	var city *string
+	var countryCode *string
+
+	if x, err := section.Key("latitude").Float64(); err == nil {
+		latitude = new(float64)
+		*latitude = x
+	}
+
+	if x, err := section.Key("longitude").Float64(); err == nil {
+		longitude = new(float64)
+		*longitude = x
+	}
+
+	if x := section.Key("country").String(); x != "" {
+		country = new(string)
+		*country = x
+	}
+
+	if x := section.Key("region").String(); x != "" {
+		region = new(string)
+		*region = x
+	}
+
+	if x := section.Key("city").String(); x != "" {
+		city = new(string)
+		*city = x
+	}
+
+	if x := section.Key("country_code").String(); x != "" {
+		countryCode = new(string)
+		*countryCode = x
+	}
+
+	return &BasicGeoIP{
+		Country:     country,
+		Region:      region,
+		City:        city,
+		Latitude:    latitude,
+		Longitude:   longitude,
+		CountryCode: countryCode,
+	}
+}
+
+func walkINIFile(iniPath string) (map[string]*BasicGeoIP, error) {
+
+	contents, err := os.ReadFile(iniPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read INI file: %v", err)
+	}
+	iniFile, err := ini.LoadSources(ini.LoadOptions{AllowNonUniqueSections: true}, contents)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load INI file: %v", err)
+	}
+
+	result := make(map[string]*BasicGeoIP)
+
+	for _, section := range iniFile.Sections() {
+		name := section.Name()
+		_, ipnet, err := net.ParseCIDR(name)
+		if err != nil {
+			// log.Printf("section %s is not a valid CIDR, skipping: %v", name, err)
+			continue
+		}
+
+		ipinfo := BasicGeoIPFromINISection(section)
+		if ipinfo != nil {
+			result[ipnet.String()] = ipinfo
+		}
+	}
+
+	return result, nil
+}
+
+func IndexINIGeoIP(root string) (map[string]*BasicGeoIP, error) {
+	type Collector struct {
+		geoipMap map[string]*BasicGeoIP
+	}
+	collector := new(Collector)
+	collector.geoipMap = make(map[string]*BasicGeoIP)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("failed to walk directory: %v", err)
+		}
+		if d.IsDir() {
+			// log.Printf("skipping directory: %s", path)
+			return nil
+		}
+		if !strings.HasSuffix(path, ".toml") {
+			// log.Printf("skipping file: %s", path)
+			return nil
+		}
+		geoipmap, err := walkINIFile(path)
+		if err != nil {
+			log.Printf("failed to walk INI file: %v", err)
+			return nil
+		}
+		for cidr, ipinfo := range geoipmap {
+			collector.geoipMap[cidr] = ipinfo
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to walk directory: %v", err)
+	}
+	return collector.geoipMap, nil
+}
+
+type CacheAccess struct {
+	GeoIPMap chan map[string]*BasicGeoIP
+}
+
+type CachedGeoIPMapWrapper struct {
+	Expiry    time.Duration
+	Root      string
+	serviceCh chan chan *CacheAccess
+}
+
+func NewCachedGeoIPMapWrapper(expiry time.Duration, root string) *CachedGeoIPMapWrapper {
+	cache := new(CachedGeoIPMapWrapper)
+	cache.Expiry = expiry
+	cache.Root = root
+	return cache
+}
+
+func (cache *CachedGeoIPMapWrapper) refreshCache() (map[string]*BasicGeoIP, time.Time, error) {
+	geoipmap, err := IndexINIGeoIP(cache.Root)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("failed to index INI GeoIP: %v", err)
+	}
+	return geoipmap, time.Now().Add(cache.Expiry), nil
+}
+
+func (cache *CachedGeoIPMapWrapper) Run(ctx context.Context) {
+	go func() {
+		defer close(cache.serviceCh)
+
+		geoipmap, expire, err := cache.refreshCache()
+		if err != nil {
+			panic(err)
+		}
+
+		for {
+			serviceSubCh := make(chan *CacheAccess)
+			select {
+			case <-ctx.Done():
+				return
+			case cache.serviceCh <- serviceSubCh:
+				serviceAccess := <-serviceSubCh
+				if expire.Before(time.Now()) {
+					log.Printf("Refreshing GeoIP map cache due to expiry")
+					geoipmap, expire, err = cache.refreshCache()
+					if err != nil {
+						panic(err)
+					}
+				}
+				serviceAccess.GeoIPMap <- geoipmap
+			}
+		}
+
+	}()
+}
+
+func (cache *CachedGeoIPMapWrapper) GetGeoIPMap(ctx context.Context) (map[string]*BasicGeoIP, error) {
+	serviceSubCh, ok := <-cache.serviceCh
+	if !ok {
+		return nil, fmt.Errorf("service channel closed")
+	}
+
+	serviceAccess := new(CacheAccess)
+	serviceAccess.GeoIPMap = make(chan map[string]*BasicGeoIP)
+	serviceSubCh <- serviceAccess
+
+	return <-serviceAccess.GeoIPMap, nil
+}
