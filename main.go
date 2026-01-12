@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -134,12 +135,12 @@ func ParseProfile(path string) (*Profile, error) {
 }
 
 type ServeCmd struct {
-	RegistryPath           string `help:"Path to the registry." type:"path" default:"registry"`
-	ISOCountryCodeDataPath string `help:"Path to the ISO country code data." type:"path" default:"ISO-3166-Countries-with-Regional-Codes"`
-	ListenAddress          string `help:"Address to listen on." type:"string" default:":18080"`
-	AutoReIndexInterval    string `help:"Interval to auto re-index the index." type:"string" default:"12h"`
-	GeoIPCacheRefreshIntvSecs int `help:"Interval to refresh the GeoIP cache." type:"int" default:"86400"`
-	INIGeoIPDBPath string `help:"Path to the INI GeoIP database." type:"path" default:"dn42-geoip/data"`
+	RegistryPath              string `help:"Path to the registry." type:"path" default:"registry"`
+	ISOCountryCodeDataPath    string `help:"Path to the ISO country code data." type:"path" default:"ISO-3166-Countries-with-Regional-Codes"`
+	ListenAddress             string `help:"Address to listen on." type:"string" default:":18080"`
+	AutoReIndexInterval       string `help:"Interval to auto re-index the index." type:"string" default:"12h"`
+	GeoIPCacheRefreshIntvSecs int    `help:"Interval to refresh the GeoIP cache." type:"int" default:"86400"`
+	INIGeoIPDBPath            string `help:"Path to the INI GeoIP database." type:"path" default:"dn42-geoip/data"`
 }
 
 type ErrResponse struct {
@@ -148,6 +149,57 @@ type ErrResponse struct {
 
 type Formattable interface {
 	String() string
+}
+
+// returns (AS Number, AS name)
+func getAS(routeRes *pkgdn42.INetNumResource, registryPath string) (*string, *string) {
+	var asnPtr *string
+	var asNamePtr *string
+
+	if routeRes != nil {
+		routeProfile, err := ParseProfile(routeRes.ProfilePath)
+		if err == nil && routeProfile != nil {
+			asn := routeProfile.GetFirst("origin")
+			if asn != nil && *asn != "" {
+				asnPtr = new(string)
+				*asnPtr = *asn
+
+				asnPattern := regexp.MustCompile(`^AS(\d+)$`)
+				if ok := asnPattern.MatchString(*asn); ok {
+					asnProfile, err := ParseProfile(filepath.Join(registryPath, "data", "aut-num", *asn))
+					if err == nil && asnProfile != nil {
+						asnName := asnProfile.GetFirst("as-name")
+						if asnName != nil && *asnName != "" {
+							*asnName = strings.TrimPrefix(*asnName, "AS-")
+							asNamePtr = new(string)
+							*asNamePtr = *asnName
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return asnPtr, asNamePtr
+}
+
+// returns (inetnumRes, routeRes)
+func getINet(ip net.IP, family pkgutils.INetFamily, inetNumIndexer *pkgdn42.INetNumIndexer, inet6NumIndexer *pkgdn42.INetNumIndexer, routeIndexer *pkgdn42.INetNumIndexer, route6Indexer *pkgdn42.INetNumIndexer) (*pkgdn42.INetNumResource, *pkgdn42.INetNumResource, error) {
+	var err error = nil
+	var inetres *pkgdn42.INetNumResource = nil
+	var routeRes *pkgdn42.INetNumResource = nil
+	if family == pkgutils.INetFamilyIPv4 {
+		inetres, err = inetNumIndexer.Query(ip, family)
+		if err == nil {
+			routeRes, err = routeIndexer.Query(ip, family)
+		}
+	} else if family == pkgutils.INetFamilyIPv6 {
+		inetres, err = inet6NumIndexer.Query(ip, family)
+		if err == nil {
+			routeRes, err = route6Indexer.Query(ip, family)
+		}
+	}
+	return inetres, routeRes, err
 }
 
 func encResp(req *http.Request, w http.ResponseWriter, resp interface{}) error {
@@ -282,7 +334,6 @@ func (s *ServeCmd) Run() error {
 		}
 	}()
 
-
 	geoipCache := pkginigeoip.NewCachedGeoIPMapWrapper(time.Duration(s.GeoIPCacheRefreshIntvSecs)*time.Second, s.INIGeoIPDBPath)
 	geoipCache.Run(ctx)
 
@@ -294,16 +345,67 @@ func (s *ServeCmd) Run() error {
 		log.Printf("Started to serve lite query for %s with raw query: %s", remoteAddr, r.URL.RawQuery)
 		defer log.Printf("Served lite query for %s with raw query: %s", remoteAddr, r.URL.RawQuery)
 
-		geoipMap, err := geoipCache.GetGeoIPMap(ctx)
-		if err != nil {
-			encResp(r, w, ErrResponse{Err: err.Error()})
+		var err error = nil
+		var ip net.IP = nil
+		var family pkgutils.INetFamily = pkgutils.INetFamilyUnknown
+		if ipToQuery := r.URL.Query().Get("ip"); ipToQuery != "" {
+			ip, family, err = pkgutils.ParseIP(ipToQuery)
+			if err != nil {
+				encResp(r, w, ErrResponse{Err: err.Error()})
+				return
+			}
+
+			inetres, routeRes, err := getINet(ip, family, inetNumIndexer, inet6NumIndexer, routeIndexer, route6Indexer)
+
+			if err != nil {
+				encResp(r, w, ErrResponse{Err: err.Error()})
+				return
+			}
+			if inetres == nil {
+				encResp(r, w, ErrResponse{Err: "No inetnum resource found for " + ipToQuery})
+				return
+			}
+
+			geoipMap, err := geoipCache.GetGeoIPMap(ctx)
+			if err != nil {
+				encResp(r, w, ErrResponse{Err: err.Error()})
+				return
+			}
+
+			ip2LocResp := &IP2LocationLikeResponse{
+				IP: &ipToQuery,
+			}
+
+			var bits int
+			if family == pkgutils.INetFamilyIPv4 {
+				bits = 32
+			} else if family == pkgutils.INetFamilyIPv6 {
+				bits = 128
+			} else {
+				encResp(r, w, ErrResponse{Err: "Invalid IP family: " + strconv.Itoa(int(family))})
+				return
+			}
+
+			if geoipMap != nil {
+				if route := geoipMap.Get(net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}); route != nil {
+					if geoipRec, ok := route.Value.(*pkginigeoip.BasicGeoIP); ok {
+						ip2LocResp.CountryCode = geoipRec.CountryCode
+						ip2LocResp.CountryName = geoipRec.Country
+						ip2LocResp.RegionName = geoipRec.Region
+						ip2LocResp.CityName = geoipRec.City
+						ip2LocResp.Latitude = geoipRec.Latitude
+						ip2LocResp.Longitude = geoipRec.Longitude
+						f := false
+						ip2LocResp.IsProxy = &f
+					}
+				}
+			}
+
+			ip2LocResp.ASN, ip2LocResp.AS = getAS(routeRes, s.RegistryPath)
+
+			encResp(r, w, ip2LocResp)
 			return
 		}
-
-		// todo
-
-
-		fmt.Fprintf(w, "todo")
 	})
 
 	serveMux.HandleFunc("/ipinfo/lite/query", func(w http.ResponseWriter, r *http.Request) {
@@ -321,19 +423,8 @@ func (s *ServeCmd) Run() error {
 				return
 			}
 
-			var inetres *pkgdn42.INetNumResource = nil
-			var routeRes *pkgdn42.INetNumResource = nil
-			if family == pkgutils.INetFamilyIPv4 {
-				inetres, err = inetNumIndexer.Query(ip, family)
-				if err == nil {
-					routeRes, err = routeIndexer.Query(ip, family)
-				}
-			} else if family == pkgutils.INetFamilyIPv6 {
-				inetres, err = inet6NumIndexer.Query(ip, family)
-				if err == nil {
-					routeRes, err = route6Indexer.Query(ip, family)
-				}
-			}
+			inetres, routeRes, err := getINet(ip, family, inetNumIndexer, inet6NumIndexer, routeIndexer, route6Indexer)
+
 			if err != nil {
 				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
@@ -359,27 +450,10 @@ func (s *ServeCmd) Run() error {
 				}
 			}
 
-			if routeRes != nil {
-				routeProfile, err := ParseProfile(routeRes.ProfilePath)
-				if err == nil && routeProfile != nil {
-					asn := routeProfile.GetFirst("origin")
-					if asn != nil && *asn != "" {
-						ipinfoResponse.ASN = asn
+			asNumber, asName := getAS(routeRes, s.RegistryPath)
+			ipinfoResponse.ASN = asNumber
+			ipinfoResponse.ASName = asName
 
-						asnPattern := regexp.MustCompile(`^AS(\d+)$`)
-						if ok := asnPattern.MatchString(*asn); ok {
-							asnProfile, err := ParseProfile(filepath.Join(s.RegistryPath, "data", "aut-num", *asn))
-							if err == nil && asnProfile != nil {
-								asnName := asnProfile.GetFirst("as-name")
-								if asnName != nil && *asnName != "" {
-									*asnName = strings.TrimPrefix(*asnName, "AS-")
-									ipinfoResponse.ASName = asnName
-								}
-							}
-						}
-					}
-				}
-			}
 			encResp(r, w, ipinfoResponse)
 			return
 		}

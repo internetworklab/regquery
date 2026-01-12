@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	pkgutils "example.com/registryquery/pkg/utils"
 	"gopkg.in/ini.v1"
 )
 
@@ -161,7 +162,7 @@ func IndexINIGeoIP(root string) (map[string]*BasicGeoIP, error) {
 }
 
 type CacheAccess struct {
-	GeoIPMap chan map[string]*BasicGeoIP
+	GeoIPMap chan *pkgutils.RouteTable
 }
 
 type CachedGeoIPMapWrapper struct {
@@ -177,12 +178,13 @@ func NewCachedGeoIPMapWrapper(expiry time.Duration, root string) *CachedGeoIPMap
 	return cache
 }
 
-func (cache *CachedGeoIPMapWrapper) refreshCache() (map[string]*BasicGeoIP, time.Time, error) {
+func (cache *CachedGeoIPMapWrapper) refreshCache() (*pkgutils.RouteTable, time.Time, error) {
 	geoipmap, err := IndexINIGeoIP(cache.Root)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("failed to index INI GeoIP: %v", err)
 	}
-	return geoipmap, time.Now().Add(cache.Expiry), nil
+	routeTable := newRouteTableFromINIGeoIPMap(geoipmap)
+	return routeTable, time.Now().Add(cache.Expiry), nil
 }
 
 func (cache *CachedGeoIPMapWrapper) Run(ctx context.Context) {
@@ -215,15 +217,38 @@ func (cache *CachedGeoIPMapWrapper) Run(ctx context.Context) {
 	}()
 }
 
-func (cache *CachedGeoIPMapWrapper) GetGeoIPMap(ctx context.Context) (map[string]*BasicGeoIP, error) {
+func (cache *CachedGeoIPMapWrapper) GetGeoIPMap(ctx context.Context) (*pkgutils.RouteTable, error) {
 	serviceSubCh, ok := <-cache.serviceCh
 	if !ok {
 		return nil, fmt.Errorf("service channel closed")
 	}
 
 	serviceAccess := new(CacheAccess)
-	serviceAccess.GeoIPMap = make(chan map[string]*BasicGeoIP)
+	serviceAccess.GeoIPMap = make(chan *pkgutils.RouteTable)
 	serviceSubCh <- serviceAccess
 
 	return <-serviceAccess.GeoIPMap, nil
+}
+
+func newRouteTableFromINIGeoIPMap(geoIPMap map[string]*BasicGeoIP) *pkgutils.RouteTable {
+	routeTable := pkgutils.NewRouteTable()
+	for cidrStr, entry := range geoIPMap {
+		_, ipnet, err := net.ParseCIDR(cidrStr)
+		if err != nil {
+			log.Printf("failed to parse CIDR %s: %v", cidrStr, err)
+			continue
+		}
+		if ipnet == nil {
+			log.Printf("failed to parse CIDR %s: ipnet is nil", cidrStr)
+			continue
+		}
+
+		route := &pkgutils.Route{
+			CIDR:  *ipnet,
+			Value: entry,
+		}
+
+		routeTable.Insert(route)
+	}
+	return routeTable
 }
