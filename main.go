@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -183,25 +182,6 @@ func getAS(routeRes *pkgdn42.INetNumResource, registryPath string) (*string, *st
 	return asnPtr, asNamePtr
 }
 
-// returns (inetnumRes, routeRes)
-func getINet(ip net.IP, family pkgutils.INetFamily, inetNumIndexer *pkgdn42.INetNumIndexer, inet6NumIndexer *pkgdn42.INetNumIndexer, routeIndexer *pkgdn42.INetNumIndexer, route6Indexer *pkgdn42.INetNumIndexer) (*pkgdn42.INetNumResource, *pkgdn42.INetNumResource, error) {
-	var err error = nil
-	var inetres *pkgdn42.INetNumResource = nil
-	var routeRes *pkgdn42.INetNumResource = nil
-	if family == pkgutils.INetFamilyIPv4 {
-		inetres, err = inetNumIndexer.Query(ip, family)
-		if err == nil {
-			routeRes, err = routeIndexer.Query(ip, family)
-		}
-	} else if family == pkgutils.INetFamilyIPv6 {
-		inetres, err = inet6NumIndexer.Query(ip, family)
-		if err == nil {
-			routeRes, err = route6Indexer.Query(ip, family)
-		}
-	}
-	return inetres, routeRes, err
-}
-
 func encResp(req *http.Request, w http.ResponseWriter, resp interface{}) error {
 	accept := req.Header.Get("Accept")
 	if accept == "" {
@@ -231,25 +211,14 @@ func encResp(req *http.Request, w http.ResponseWriter, resp interface{}) error {
 	return json.NewEncoder(w).Encode(resp)
 }
 
-func (s *ServeCmd) Run() error {
-	ctx := context.Background()
-
-	log.Printf("Serving queries from %s", s.RegistryPath)
-
-	var autoReIndexInterval time.Duration
-	var err error = nil
-	autoReIndexInterval, err = time.ParseDuration(s.AutoReIndexInterval)
-	if err != nil {
-		return err
-	}
-
+func getISO3166CountryCodeRecords(registryPath string) (map[string][]pkgiso3166.ISOCountryCodeRecord, error) {
 	var isoCountryCodeRecords []pkgiso3166.ISOCountryCodeRecord = nil
-	isoCountryDataF, err := os.Open(filepath.Join(s.ISOCountryCodeDataPath, "all", "all.json"))
+	isoCountryDataF, err := os.Open(registryPath)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to open ISO country code data file: %v", err)
 	}
 	if err := json.NewDecoder(isoCountryDataF).Decode(&isoCountryCodeRecords); err != nil {
-		return err
+		return nil, fmt.Errorf("failed to decode ISO country code data file: %v", err)
 	}
 
 	isoAlpha2Map := make(map[string][]pkgiso3166.ISOCountryCodeRecord)
@@ -259,13 +228,58 @@ func (s *ServeCmd) Run() error {
 			isoAlpha2Map[*key] = append(isoAlpha2Map[*key], record)
 		}
 	}
+	return isoAlpha2Map, nil
+}
+
+type DN42ResIndexer struct {
+	INetNumIndexer  *pkgdn42.INetNumIndexer
+	INet6NumIndexer *pkgdn42.INetNumIndexer
+	RouteIndexer    *pkgdn42.INetNumIndexer
+	Route6Indexer   *pkgdn42.INetNumIndexer
+}
+
+// returns (inetnumRes, routeRes)
+func (dn42Indexer *DN42ResIndexer) GetINetInfo(ip net.IP, family pkgutils.INetFamily) (*pkgdn42.INetNumResource, *pkgdn42.INetNumResource, *Profile, error) {
+
+	if dn42Indexer == nil {
+		return nil, nil, nil, fmt.Errorf("dn42 indexer is nil")
+	}
+
+	var err error = nil
+	var inetres *pkgdn42.INetNumResource = nil
+	var routeRes *pkgdn42.INetNumResource = nil
+	var inetnumProfile *Profile = nil
+	if family == pkgutils.INetFamilyIPv4 {
+		inetres, err = dn42Indexer.INetNumIndexer.Query(ip, family)
+		if err == nil {
+			routeRes, err = dn42Indexer.RouteIndexer.Query(ip, family)
+		}
+	} else if family == pkgutils.INetFamilyIPv6 {
+		inetres, err = dn42Indexer.INet6NumIndexer.Query(ip, family)
+		if err == nil {
+			routeRes, err = dn42Indexer.Route6Indexer.Query(ip, family)
+		}
+	}
+
+	if inetres != nil {
+		inetnumProfile, err = ParseProfile(inetres.ProfilePath)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to parse inetnum profile")
+		}
+	}
+
+	return inetres, routeRes, inetnumProfile, err
+}
+
+func NewDN42ResIndexer(ctx context.Context, autoReIndexInterval time.Duration, registryPath string) (*DN42ResIndexer, error) {
+	dn42Indexer := new(DN42ResIndexer)
 
 	inet6NumIndexer := pkgdn42.NewINetNumIndexer(
 		pkgutils.INetFamilyIPv6,
-		filepath.Join(s.RegistryPath, "data", "inet6num"),
+		filepath.Join(registryPath, "data", "inet6num"),
 	)
 	if err := inet6NumIndexer.Index(ctx); err != nil {
-		return err
+		return nil, fmt.Errorf("failed to index inet6num: %v", err)
 	}
 	go func() {
 		for err := range inet6NumIndexer.AutoReIndex(ctx, autoReIndexInterval) {
@@ -279,12 +293,12 @@ func (s *ServeCmd) Run() error {
 
 	inetNumIndexer := pkgdn42.NewINetNumIndexer(
 		pkgutils.INetFamilyIPv4,
-		filepath.Join(s.RegistryPath, "data", "inetnum"),
+		filepath.Join(registryPath, "data", "inetnum"),
 	)
 
-	err = inetNumIndexer.Index(ctx)
+	err := inetNumIndexer.Index(ctx)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to index inetnum: %v", err)
 	}
 	go func() {
 		for err := range inetNumIndexer.AutoReIndex(ctx, autoReIndexInterval) {
@@ -299,11 +313,11 @@ func (s *ServeCmd) Run() error {
 	// for ROA4
 	routeIndexer := pkgdn42.NewINetNumIndexer(
 		pkgutils.INetFamilyIPv4,
-		filepath.Join(s.RegistryPath, "data", "route"),
+		filepath.Join(registryPath, "data", "route"),
 	)
 
 	if err := routeIndexer.Index(ctx); err != nil {
-		return err
+		return nil, fmt.Errorf("failed to index route: %v", err)
 	}
 	go func() {
 		for err := range routeIndexer.AutoReIndex(ctx, autoReIndexInterval) {
@@ -318,11 +332,11 @@ func (s *ServeCmd) Run() error {
 	// for ROA6
 	route6Indexer := pkgdn42.NewINetNumIndexer(
 		pkgutils.INetFamilyIPv6,
-		filepath.Join(s.RegistryPath, "data", "route6"),
+		filepath.Join(registryPath, "data", "route6"),
 	)
 
 	if err := route6Indexer.Index(ctx); err != nil {
-		return err
+		return nil, fmt.Errorf("failed to index route6: %v", err)
 	}
 	go func() {
 		for err := range route6Indexer.AutoReIndex(ctx, autoReIndexInterval) {
@@ -333,6 +347,35 @@ func (s *ServeCmd) Run() error {
 			}
 		}
 	}()
+
+	dn42Indexer.INetNumIndexer = inetNumIndexer
+	dn42Indexer.INet6NumIndexer = inet6NumIndexer
+	dn42Indexer.RouteIndexer = routeIndexer
+	dn42Indexer.Route6Indexer = route6Indexer
+	return dn42Indexer, nil
+}
+
+func (s *ServeCmd) Run() error {
+	ctx := context.Background()
+
+	log.Printf("Serving queries from %s", s.RegistryPath)
+
+	var autoReIndexInterval time.Duration
+	var err error = nil
+	autoReIndexInterval, err = time.ParseDuration(s.AutoReIndexInterval)
+	if err != nil {
+		return err
+	}
+
+	isoAlpha2Map, err := getISO3166CountryCodeRecords(filepath.Join(s.ISOCountryCodeDataPath, "all", "all.json"))
+	if err != nil {
+		return err
+	}
+
+	dn42Indexer, err := NewDN42ResIndexer(ctx, autoReIndexInterval, s.RegistryPath)
+	if err != nil {
+		return fmt.Errorf("failed to create DN42 res indexer: %v", err)
+	}
 
 	geoipCache := pkginigeoip.NewCachedGeoIPMapWrapper(time.Duration(s.GeoIPCacheRefreshIntvSecs)*time.Second, s.INIGeoIPDBPath)
 	geoipCache.Run(ctx)
@@ -348,14 +391,15 @@ func (s *ServeCmd) Run() error {
 		var err error = nil
 		var ip net.IP = nil
 		var family pkgutils.INetFamily = pkgutils.INetFamilyUnknown
+		var bits int = 0
 		if ipToQuery := r.URL.Query().Get("ip"); ipToQuery != "" {
-			ip, family, err = pkgutils.ParseIP(ipToQuery)
+			ip, family, bits, err = pkgutils.ParseIP(ipToQuery)
 			if err != nil {
 				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 
-			inetres, routeRes, err := getINet(ip, family, inetNumIndexer, inet6NumIndexer, routeIndexer, route6Indexer)
+			inetres, routeRes, _, err := dn42Indexer.GetINetInfo(ip, family)
 
 			if err != nil {
 				encResp(r, w, ErrResponse{Err: err.Error()})
@@ -374,16 +418,6 @@ func (s *ServeCmd) Run() error {
 
 			ip2LocResp := &IP2LocationLikeResponse{
 				IP: &ipToQuery,
-			}
-
-			var bits int
-			if family == pkgutils.INetFamilyIPv4 {
-				bits = 32
-			} else if family == pkgutils.INetFamilyIPv6 {
-				bits = 128
-			} else {
-				encResp(r, w, ErrResponse{Err: "Invalid IP family: " + strconv.Itoa(int(family))})
-				return
 			}
 
 			if geoipMap != nil {
@@ -417,25 +451,20 @@ func (s *ServeCmd) Run() error {
 		var ip net.IP = nil
 		var family pkgutils.INetFamily = pkgutils.INetFamilyUnknown
 		if ipToQuery := r.URL.Query().Get("ip"); ipToQuery != "" {
-			ip, family, err = pkgutils.ParseIP(ipToQuery)
+			ip, family, _, err = pkgutils.ParseIP(ipToQuery)
 			if err != nil {
 				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 
-			inetres, routeRes, err := getINet(ip, family, inetNumIndexer, inet6NumIndexer, routeIndexer, route6Indexer)
-
+			inetres, routeRes, inetNumProfile, err := dn42Indexer.GetINetInfo(ip, family)
 			if err != nil {
 				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
+
 			if inetres == nil {
 				encResp(r, w, ErrResponse{Err: "No inetnum resource found for " + ipToQuery})
-				return
-			}
-			inetNumProfile, err := ParseProfile(inetres.ProfilePath)
-			if err != nil {
-				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 
@@ -469,32 +498,27 @@ func (s *ServeCmd) Run() error {
 		var family pkgutils.INetFamily = pkgutils.INetFamilyUnknown
 
 		if ipToQuery := r.URL.Query().Get("ip"); ipToQuery != "" {
-			ip, family, err = pkgutils.ParseIP(ipToQuery)
+			ip, family, _, err = pkgutils.ParseIP(ipToQuery)
 			if err != nil {
 				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 
-			var inetres *pkgdn42.INetNumResource = nil
-			if family == pkgutils.INetFamilyIPv4 {
-				inetres, err = inetNumIndexer.Query(ip, family)
-			} else if family == pkgutils.INetFamilyIPv6 {
-				inetres, err = inet6NumIndexer.Query(ip, family)
-			}
+			inetres, _, inetnumProfile, err := dn42Indexer.GetINetInfo(ip, family)
 			if err != nil {
 				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
+
 			if inetres == nil {
 				encResp(r, w, ErrResponse{Err: "No inetnum resource found for " + ipToQuery})
 				return
 			}
-			profile, err := ParseProfile(inetres.ProfilePath)
-			if err != nil {
-				encResp(r, w, ErrResponse{Err: err.Error()})
+			if inetnumProfile == nil {
+				encResp(r, w, ErrResponse{Err: "No inetnum profile found for " + ipToQuery})
 				return
 			}
-			encResp(r, w, profile)
+			encResp(r, w, inetnumProfile)
 			return
 		}
 	})

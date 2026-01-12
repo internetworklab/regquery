@@ -183,7 +183,10 @@ func (cache *CachedGeoIPMapWrapper) refreshCache() (*pkgutils.RouteTable, time.T
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("failed to index INI GeoIP: %v", err)
 	}
-	routeTable := newRouteTableFromINIGeoIPMap(geoipmap)
+	routeTable, err := newRouteTableFromINIGeoIPMap(geoipmap)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("failed to create route table from INI GeoIP map: %v", err)
+	}
 	return routeTable, time.Now().Add(cache.Expiry), nil
 }
 
@@ -230,25 +233,15 @@ func (cache *CachedGeoIPMapWrapper) GetGeoIPMap(ctx context.Context) (*pkgutils.
 	return <-serviceAccess.GeoIPMap, nil
 }
 
-func newRouteTableFromINIGeoIPMap(geoIPMap map[string]*BasicGeoIP) *pkgutils.RouteTable {
-	routeTable := pkgutils.NewRouteTable()
+func newRouteTableFromINIGeoIPMap(geoIPMap map[string]*BasicGeoIP) (*pkgutils.RouteTable, error) {
+	anyMap := make(map[string]interface{})
 	for cidrStr, entry := range geoIPMap {
-		_, ipnet, err := net.ParseCIDR(cidrStr)
-		if err != nil {
-			log.Printf("failed to parse CIDR %s: %v", cidrStr, err)
-			continue
-		}
-		if ipnet == nil {
-			log.Printf("failed to parse CIDR %s: ipnet is nil", cidrStr)
-			continue
-		}
-
-		route := &pkgutils.Route{
-			CIDR:  *ipnet,
-			Value: entry,
-		}
-
-		routeTable.Insert(route)
+		anyMap[cidrStr] = entry
 	}
-	return routeTable
+	routeTable, err := pkgutils.NewRouteTableFromMap(anyMap)
+	if err != nil {
+		log.Printf("failed to create route table from INI GeoIP map: %v", err)
+		return nil, fmt.Errorf("failed to create route table from INI GeoIP map: %v", err)
+	}
+	return routeTable, nil
 }

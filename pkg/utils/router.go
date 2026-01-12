@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 
 	"github.com/google/btree"
@@ -17,6 +18,21 @@ func NewRouteTable() *RouteTable {
 		routeGroups:  btree.New(2),
 		routeGroups6: btree.New(2),
 	}
+}
+
+func NewRouteTableFromMap(data map[string]interface{}) (*RouteTable, error) {
+	table := NewRouteTable()
+	for cidr, value := range data {
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse CIDR %s: %v", cidr, err)
+		}
+		if ipnet == nil {
+			return nil, fmt.Errorf("failed to parse CIDR %s: the ipnet is nil", cidr)
+		}
+		table.Insert(&Route{CIDR: *ipnet, Value: value})
+	}
+	return table, nil
 }
 
 func (routeTable *RouteTable) getRouteCollection(bits int) *btree.BTree {
