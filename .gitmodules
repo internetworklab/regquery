@@ -4,3 +4,6 @@
 [submodule "ISO-3166-Countries-with-Regional-Codes"]
 	path = ISO-3166-Countries-with-Regional-Codes
 	url = https://github.com/lukes/ISO-3166-Countries-with-Regional-Codes.git
+[submodule "dn42-geoip"]
+	path = dn42-geoip
+	url = https://github.com/Xe-iu/dn42-geoip.git

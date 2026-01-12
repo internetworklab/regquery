@@ -7,37 +7,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	pkgdn42 "example.com/registryquery/pkg/dn42"
+	pkgiso3166 "example.com/registryquery/pkg/iso3166"
 	pkgutils "example.com/registryquery/pkg/utils"
 	"github.com/alecthomas/kong"
-	"github.com/google/btree"
 	"gopkg.in/yaml.v3"
 )
-
-type ISOCountryCodeRecord struct {
-	Name                   *string `json:"name,omitempty"`
-	Alpha2                 *string `json:"alpha-2,omitempty"`
-	Alpha3                 *string `json:"alpha-3,omitempty"`
-	CountryCode            *string `json:"country-code,omitempty"`
-	ISO31662               *string `json:"iso_3166-2,omitempty"`
-	Region                 *string `json:"region,omitempty"`
-	SubRegion              *string `json:"sub-region,omitempty"`
-	IntermediateRegion     *string `json:"intermediate-region,omitempty"`
-	RegionCode             *string `json:"region-code,omitempty"`
-	SubRegionCode          *string `json:"sub-region-code,omitempty"`
-	IntermediateRegionCode *string `json:"intermediate-region-code,omitempty"`
-}
 
 type IPInfoLikeResponse struct {
 	IP            string  `json:"ip"`
@@ -191,7 +175,7 @@ func (s *ServeCmd) Run() error {
 		return err
 	}
 
-	var isoCountryCodeRecords []ISOCountryCodeRecord = nil
+	var isoCountryCodeRecords []pkgiso3166.ISOCountryCodeRecord = nil
 	isoCountryDataF, err := os.Open(filepath.Join(s.ISOCountryCodeDataPath, "all", "all.json"))
 	if err != nil {
 		return err
@@ -200,7 +184,7 @@ func (s *ServeCmd) Run() error {
 		return err
 	}
 
-	isoAlpha2Map := make(map[string][]ISOCountryCodeRecord)
+	isoAlpha2Map := make(map[string][]pkgiso3166.ISOCountryCodeRecord)
 	for _, record := range isoCountryCodeRecords {
 		key := record.Alpha2
 		if key != nil && *key != "" {
@@ -208,8 +192,8 @@ func (s *ServeCmd) Run() error {
 		}
 	}
 
-	inet6NumIndexer := NewINetNumIndexer(
-		INetFamilyIPv6,
+	inet6NumIndexer := pkgdn42.NewINetNumIndexer(
+		pkgutils.INetFamilyIPv6,
 		filepath.Join(s.RegistryPath, "data", "inet6num"),
 	)
 	if err := inet6NumIndexer.Index(ctx); err != nil {
@@ -225,8 +209,8 @@ func (s *ServeCmd) Run() error {
 		}
 	}()
 
-	inetNumIndexer := NewINetNumIndexer(
-		INetFamilyIPv4,
+	inetNumIndexer := pkgdn42.NewINetNumIndexer(
+		pkgutils.INetFamilyIPv4,
 		filepath.Join(s.RegistryPath, "data", "inetnum"),
 	)
 
@@ -245,8 +229,8 @@ func (s *ServeCmd) Run() error {
 	}()
 
 	// for ROA4
-	routeIndexer := NewINetNumIndexer(
-		INetFamilyIPv4,
+	routeIndexer := pkgdn42.NewINetNumIndexer(
+		pkgutils.INetFamilyIPv4,
 		filepath.Join(s.RegistryPath, "data", "route"),
 	)
 
@@ -264,8 +248,8 @@ func (s *ServeCmd) Run() error {
 	}()
 
 	// for ROA6
-	route6Indexer := NewINetNumIndexer(
-		INetFamilyIPv6,
+	route6Indexer := pkgdn42.NewINetNumIndexer(
+		pkgutils.INetFamilyIPv6,
 		filepath.Join(s.RegistryPath, "data", "route6"),
 	)
 
@@ -290,22 +274,22 @@ func (s *ServeCmd) Run() error {
 
 		var err error = nil
 		var ip net.IP = nil
-		var family INetFamily = INetFamilyUnknown
+		var family pkgutils.INetFamily = pkgutils.INetFamilyUnknown
 		if ipToQuery := r.URL.Query().Get("ip"); ipToQuery != "" {
-			ip, family, err = parseIP(ipToQuery)
+			ip, family, err = pkgutils.ParseIP(ipToQuery)
 			if err != nil {
 				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 
-			var inetres *INetNumResource = nil
-			var routeRes *INetNumResource = nil
-			if family == INetFamilyIPv4 {
+			var inetres *pkgdn42.INetNumResource = nil
+			var routeRes *pkgdn42.INetNumResource = nil
+			if family == pkgutils.INetFamilyIPv4 {
 				inetres, err = inetNumIndexer.Query(ip, family)
 				if err == nil {
 					routeRes, err = routeIndexer.Query(ip, family)
 				}
-			} else if family == INetFamilyIPv6 {
+			} else if family == pkgutils.INetFamilyIPv6 {
 				inetres, err = inet6NumIndexer.Query(ip, family)
 				if err == nil {
 					routeRes, err = route6Indexer.Query(ip, family)
@@ -369,19 +353,19 @@ func (s *ServeCmd) Run() error {
 
 		var err error = nil
 		var ip net.IP = nil
-		var family INetFamily = INetFamilyUnknown
+		var family pkgutils.INetFamily = pkgutils.INetFamilyUnknown
 
 		if ipToQuery := r.URL.Query().Get("ip"); ipToQuery != "" {
-			ip, family, err = parseIP(ipToQuery)
+			ip, family, err = pkgutils.ParseIP(ipToQuery)
 			if err != nil {
 				encResp(r, w, ErrResponse{Err: err.Error()})
 				return
 			}
 
-			var inetres *INetNumResource = nil
-			if family == INetFamilyIPv4 {
+			var inetres *pkgdn42.INetNumResource = nil
+			if family == pkgutils.INetFamilyIPv4 {
 				inetres, err = inetNumIndexer.Query(ip, family)
-			} else if family == INetFamilyIPv6 {
+			} else if family == pkgutils.INetFamilyIPv6 {
 				inetres, err = inet6NumIndexer.Query(ip, family)
 			}
 			if err != nil {
@@ -413,216 +397,6 @@ func (s *ServeCmd) Run() error {
 	log.Printf("Serving queries on %s", s.ListenAddress)
 
 	return server.Serve(listener)
-}
-
-type INetFamily int
-
-const (
-	INetFamilyUnknown INetFamily = iota
-	INetFamilyIPv4    INetFamily = 4
-	INetFamilyIPv6    INetFamily = 6
-)
-
-type INetNumResource struct {
-	StartAddress net.IP
-	Family       INetFamily
-	Prefix       string
-	PrefixLen    int
-	ProfilePath  string
-}
-
-func (res *INetNumResource) Less(other btree.Item) bool {
-	if other, ok := other.(*INetNumResource); ok {
-		return bytes.Compare(res.StartAddress, other.StartAddress) < 0
-	}
-	panic("other is not an INetNumResource (impossible)")
-}
-
-func (resGroup *INetNumResourceGroup) Less(other btree.Item) bool {
-	if other, ok := other.(*INetNumResourceGroup); ok {
-		return resGroup.PrefixLen < other.PrefixLen
-	}
-	panic("other is not an INetNumResourceGroup (impossible)")
-}
-
-type INetNumResourceGroup struct {
-	PrefixLen int
-
-	// indexed collection of INetNumResource
-	Resources *btree.BTree
-}
-
-type INetNumIndexer struct {
-	Family INetFamily
-
-	DirPath string
-
-	// indexed collection of INetNumResourceGroup
-	ResourceGroups *btree.BTree
-
-	lock sync.Mutex
-}
-
-func NewINetNumIndexer(family INetFamily, dirPath string) *INetNumIndexer {
-	indexer := &INetNumIndexer{
-		Family:         family,
-		DirPath:        dirPath,
-		ResourceGroups: btree.New(2),
-		lock:           sync.Mutex{},
-	}
-
-	return indexer
-}
-
-func (indexer *INetNumIndexer) setIndex(index *btree.BTree) {
-	indexer.lock.Lock()
-	defer indexer.lock.Unlock()
-	indexer.ResourceGroups = index
-}
-
-func (indexer *INetNumIndexer) getIndexRef() *btree.BTree {
-	indexer.lock.Lock()
-	defer indexer.lock.Unlock()
-	return indexer.ResourceGroups
-}
-
-func doBuildIndex(family INetFamily, dirPath string) (*btree.BTree, error) {
-	index := btree.New(2)
-	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			log.Printf("Error walking %s: %v", path, err)
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-
-		pattern := regexp.MustCompile(`_(\d+)$`)
-		matches := pattern.FindStringSubmatch(d.Name())
-		if matches == nil {
-			return nil
-		}
-
-		if len(matches) < 2 {
-			return nil
-		}
-
-		maskLenStr := matches[1]
-		maskLen, err := strconv.Atoi(maskLenStr)
-		if err != nil {
-			log.Printf("Error converting %s to int when walking %s: %v", maskLenStr, path, err)
-			return nil
-		}
-		prefix := d.Name()[:len(d.Name())-len(matches[0])]
-
-		if !index.Has(&INetNumResourceGroup{PrefixLen: maskLen}) {
-			index.ReplaceOrInsert(&INetNumResourceGroup{PrefixLen: maskLen, Resources: btree.New(2)})
-		}
-
-		group := index.Get(&INetNumResourceGroup{PrefixLen: maskLen})
-		if group == nil {
-			panic("group is nil (impossible)")
-		}
-
-		var startAddr net.IP
-		parsedIP := net.ParseIP(prefix)
-		if family == INetFamilyIPv4 {
-			startAddr = parsedIP.To4()
-		} else if family == INetFamilyIPv6 {
-			startAddr = parsedIP.To16()
-		} else {
-			panic("family is not valid (impossible)")
-		}
-		inetRes := &INetNumResource{StartAddress: startAddr, Family: family, Prefix: prefix, PrefixLen: maskLen, ProfilePath: path}
-		group.(*INetNumResourceGroup).Resources.ReplaceOrInsert(inetRes)
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return index, err
-}
-
-func (indexer *INetNumIndexer) Index(ctx context.Context) error {
-	newIndex, err := doBuildIndex(indexer.Family, indexer.DirPath)
-	if err != nil {
-		return err
-	}
-
-	indexer.setIndex(newIndex)
-	return nil
-}
-
-func (indexer *INetNumIndexer) AutoReIndex(ctx context.Context, every time.Duration) <-chan error {
-	errChan := make(chan error)
-	go func() {
-		tick := time.NewTicker(every)
-		defer tick.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-				if err := indexer.Index(ctx); err != nil {
-					errChan <- err
-				} else {
-					errChan <- nil
-				}
-			}
-		}
-	}()
-	return errChan
-}
-
-func parseIP(address string) (ip net.IP, family INetFamily, err error) {
-	ip = net.ParseIP(address)
-	if ip4 := ip.To4(); ip4 != nil {
-		family = INetFamilyIPv4
-		ip = ip4
-	} else if ip6 := ip.To16(); ip6 != nil {
-		family = INetFamilyIPv6
-		ip = ip6
-	} else {
-		return nil, INetFamilyUnknown, fmt.Errorf("%s is not an ip address of known family", address)
-	}
-	return ip, family, nil
-}
-
-func (indexer *INetNumIndexer) Query(address net.IP, family INetFamily) (*INetNumResource, error) {
-	var result *INetNumResource = new(INetNumResource)
-	var found *bool = new(bool)
-	*found = false
-
-	indexer.getIndexRef().Descend(func(item btree.Item) bool {
-		resGroup, ok := item.(*INetNumResourceGroup)
-		if !ok {
-			panic("item is not an INetNumResourceGroup (impossible)")
-		}
-
-		var maskedIPAddress net.IP
-		if family == INetFamilyIPv4 {
-			maskedIPAddress = address.Mask(net.CIDRMask(resGroup.PrefixLen, 32))
-		} else if family == INetFamilyIPv6 {
-			maskedIPAddress = address.Mask(net.CIDRMask(resGroup.PrefixLen, 128))
-		} else {
-			panic("family is not valid (impossible)")
-		}
-
-		inetresItem := resGroup.Resources.Get(&INetNumResource{StartAddress: maskedIPAddress})
-		if inetres, ok := inetresItem.(*INetNumResource); ok {
-			*result = *inetres
-			*found = true
-			return false
-		}
-
-		return true
-	})
-
-	if *found {
-		return result, nil
-	}
-	return nil, nil
 }
 
 var CLI struct {
