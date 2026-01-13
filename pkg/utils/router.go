@@ -118,5 +118,8 @@ func (routeGroup *RouteGroup) Insert(route *Route) {
 func (routeGroup *RouteGroup) Get(ipnet net.IPNet) *Route {
 	_, bits := ipnet.Mask.Size()
 	mask := net.CIDRMask(routeGroup.PrefixLen, bits)
-	return routeGroup.store.Get(&Route{CIDR: net.IPNet{IP: ipnet.IP.Mask(mask), Mask: mask}}).(*Route)
+	if item := routeGroup.store.Get(&Route{CIDR: net.IPNet{IP: ipnet.IP.Mask(mask), Mask: mask}}); item != nil {
+		return item.(*Route)
+	}
+	return nil
 }

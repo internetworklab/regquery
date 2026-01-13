@@ -175,6 +175,7 @@ func NewCachedGeoIPMapWrapper(expiry time.Duration, root string) *CachedGeoIPMap
 	cache := new(CachedGeoIPMapWrapper)
 	cache.Expiry = expiry
 	cache.Root = root
+	cache.serviceCh = make(chan chan *CacheAccess)
 	return cache
 }
 
@@ -187,6 +188,8 @@ func (cache *CachedGeoIPMapWrapper) refreshCache() (*pkgutils.RouteTable, time.T
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("failed to create route table from INI GeoIP map: %v", err)
 	}
+
+	log.Printf("Refreshed GeoIP map cache with %d entries", len(geoipmap))
 	return routeTable, time.Now().Add(cache.Expiry), nil
 }
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=Update dn42-geoip repository UTC 4AM every day
+Documentation=man:systemd.timer(5)
+
+[Timer]
+OnCalendar=*-*-* 4:00:00
+Persistent=true
+RandomizedDelaySec=300
+AccuracySec=1h
+
+[Install]
+WantedBy=timers.target

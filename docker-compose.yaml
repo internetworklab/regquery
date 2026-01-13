@@ -9,6 +9,7 @@ services:
     volumes:
       - "./ISO-3166-Countries-with-Regional-Codes:/app/regquery/ISO-3166-Countries-with-Regional-Codes:ro"
       - "./registry:/app/regquery/registry:ro"
+      - "./dn42-geoip:/app/regquery/dn42-geoip:ro"
       - "./override:/app/regquery/override:ro"
     command:
       - "/usr/local/bin/regquery"
