@@ -3,6 +3,7 @@ package utils
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"net"
 
 	"github.com/google/btree"
@@ -20,15 +21,57 @@ func NewRouteTable() *RouteTable {
 	}
 }
 
-func NewRouteTableFromMap(data map[string]interface{}) (*RouteTable, error) {
+func parseCIDR(cidr string) (*net.IPNet, error) {
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CIDR %s: %v", cidr, err)
+	}
+	if ipnet == nil {
+		return nil, fmt.Errorf("failed to parse CIDR %s: the ipnet is nil", cidr)
+	}
+	return ipnet, nil
+}
+
+func parseIP(ip string) (net.IP, int, error) {
+	ipaddr := net.ParseIP(ip)
+
+	if ipaddr == nil {
+		return nil, 0, fmt.Errorf("failed to parse IP %s: it is not an valid ip address", ip)
+	}
+
+	if ip4 := ipaddr.To4(); ip4 != nil {
+		return ip4, 32, nil
+	}
+
+	return ipaddr, 128, nil
+}
+
+func parseIPOrCIDR(ipOrCIDR string) (*net.IPNet, error) {
+	ipNet, err := parseCIDR(ipOrCIDR)
+	if err == nil {
+		return ipNet, nil
+	}
+	ip, bits, err := parseIP(ipOrCIDR)
+	if err == nil {
+		mask := net.CIDRMask(bits, bits)
+		return &net.IPNet{IP: ip, Mask: mask}, nil
+	}
+	return nil, fmt.Errorf("string %s is neither a valid CIDR nor a valid IP address: %w", ipOrCIDR, err)
+}
+
+func NewRouteTableFromMap(data map[string]interface{}, skipInvalids bool) (*RouteTable, error) {
 	table := NewRouteTable()
 	for cidr, value := range data {
-		_, ipnet, err := net.ParseCIDR(cidr)
+		ipnet, err := parseIPOrCIDR(cidr)
 		if err != nil {
+			if skipInvalids {
+				log.Printf("skipping invalid CIDR %s: %v", cidr, err)
+				continue
+			}
 			return nil, fmt.Errorf("failed to parse CIDR %s: %v", cidr, err)
 		}
 		if ipnet == nil {
-			return nil, fmt.Errorf("failed to parse CIDR %s: the ipnet is nil", cidr)
+			log.Printf("invalid CIDR %s: the ipnet is nil", cidr)
 		}
 		table.Insert(&Route{CIDR: *ipnet, Value: value})
 	}

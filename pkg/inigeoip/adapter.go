@@ -241,7 +241,7 @@ func newRouteTableFromINIGeoIPMap(geoIPMap map[string]*BasicGeoIP) (*pkgutils.Ro
 	for cidrStr, entry := range geoIPMap {
 		anyMap[cidrStr] = entry
 	}
-	routeTable, err := pkgutils.NewRouteTableFromMap(anyMap)
+	routeTable, err := pkgutils.NewRouteTableFromMap(anyMap, true)
 	if err != nil {
 		log.Printf("failed to create route table from INI GeoIP map: %v", err)
 		return nil, fmt.Errorf("failed to create route table from INI GeoIP map: %v", err)
