@@ -6,6 +6,24 @@ regquery is a simple and efficient internet registry lookup service program, it 
 
 ## Examples
 
+To return IP2Location-like GeoIP response:
+
+```
+curl -s -o - --url-query ip=172.20.143.17 https://regquery.ping2.sh/ip2location/v1/query | jq
+{
+  "ip": "172.20.143.17",
+  "country_code": "US",
+  "country_name": "United States",
+  "region_name": "California",
+  "city_name": "Los Angeles",
+  "latitude": 34.05223,
+  "longitude": -118.24368,
+  "asn": "AS4242421771",
+  "as": "DUSTSTARS-DN42",
+  "is_proxy": false
+}
+```
+
 Query for LPM match in `data/inetnum` and `data/inet6num` directory:
 
 ```shell
