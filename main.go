@@ -66,6 +66,10 @@ func (s *ServeCmd) Run() error {
 		DN42Indexer: dn42Indexer,
 	})
 
+	serveMux.Handle("/iso3166/query", &pkghandler.ISO3166Handler{
+		ISOAlpha2Map: isoAlpha2Map,
+	})
+
 	server := &http.Server{
 		Handler: serveMux,
 	}
