@@ -1,9 +1,14 @@
+networks:
+  globalpinghub:
+    external: true
 services:
   regquery:
     container_name: regquery
     working_dir: /app/regquery
     image: ghcr.io/internetworklab/regquery:latest
     pull_policy: always
+    networks:
+      - globalpinghub
     ports:
       - "18080:18080"
     volumes:
