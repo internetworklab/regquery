@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	pkgtomlgeoip "example.com/registryquery/pkg/tomlgeoip"
 	pkgutils "example.com/registryquery/pkg/utils"
 	"gopkg.in/ini.v1"
 )
@@ -96,37 +96,81 @@ func BasicGeoIPFromINISection(section *ini.Section) *BasicGeoIP {
 	}
 }
 
-func walkINIFile(iniPath string) (map[string]*BasicGeoIP, error) {
-
-	contents, err := os.ReadFile(iniPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read INI file: %v", err)
+func BasicGeoIPFromMaster(master pkgtomlgeoip.IPGeoDataMaster) (*BasicGeoIP, error) {
+	result := &BasicGeoIP{}
+	if country := master.Country; country != nil {
+		result.Country = country.Name
+		result.CountryCode = country.Code
 	}
-	iniFile, err := ini.LoadSources(ini.LoadOptions{AllowNonUniqueSections: true}, contents)
+
+	return result, nil
+}
+
+func BasicGeoIPFromEntry(record pkgtomlgeoip.IPGeoDataEntry) (*BasicGeoIP, error) {
+	result := &BasicGeoIP{}
+	if country := record.Country; country != nil {
+		result.Country = country.Name
+		result.CountryCode = country.Code
+	}
+
+	if region := record.Region; region != nil {
+		if regionName := region.Name; regionName != nil {
+			result.Region = regionName
+		} else if regionCode := region.Code; regionCode != nil {
+			result.Region = regionCode
+		}
+	}
+	result.City = result.Region
+	if city := record.City; city != nil && *city != "" {
+		result.City = city
+	}
+
+	if lat := record.Latitude; lat != nil {
+		result.Latitude = lat
+	}
+	if lon := record.Longitude; lon != nil {
+		result.Longitude = lon
+	}
+
+	return result, nil
+}
+
+// Returning a map, where key is CIDR (as returned by `net.IPNet.String()`), value is `*BasicGeoIP`
+func WalkTOMLFile(tomlPath string) (map[string]*BasicGeoIP, error) {
+	f, err := os.Open(tomlPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load INI file: %v", err)
+		return nil, fmt.Errorf("failed to open TOML file: %w", err)
+	}
+	defer f.Close()
+
+	_, ipGeoData, err := pkgtomlgeoip.IPGeoDataFromTOML(f)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse TOML: %w", err)
 	}
 
 	result := make(map[string]*BasicGeoIP)
-
-	for _, section := range iniFile.Sections() {
-		name := section.Name()
-		_, ipnet, err := net.ParseCIDR(name)
-		if err != nil {
-			// log.Printf("section %s is not a valid CIDR, skipping: %v", name, err)
-			continue
+	if masterRecord := ipGeoData.Master; masterRecord != nil {
+		if cidr := masterRecord.CIDR; cidr != nil && *cidr != "" {
+			if v, err := BasicGeoIPFromMaster(*masterRecord); err == nil {
+				result[*cidr] = v
+			}
 		}
+	}
 
-		ipinfo := BasicGeoIPFromINISection(section)
-		if ipinfo != nil {
-			result[ipnet.String()] = ipinfo
+	if geoipRecords := ipGeoData.GeoData; geoipRecords != nil {
+		for _, geoipRecord := range geoipRecords {
+			if cidr := geoipRecord.CIDR; cidr != nil && *cidr != "" {
+				if v, err := BasicGeoIPFromEntry(geoipRecord); err == nil {
+					result[*cidr] = v
+				}
+			}
 		}
 	}
 
 	return result, nil
 }
 
-func IndexINIGeoIP(root string) (map[string]*BasicGeoIP, error) {
+func IndexTOMLGeoIP(root string) (map[string]*BasicGeoIP, error) {
 	type Collector struct {
 		geoipMap map[string]*BasicGeoIP
 	}
@@ -144,7 +188,7 @@ func IndexINIGeoIP(root string) (map[string]*BasicGeoIP, error) {
 			// log.Printf("skipping file: %s", path)
 			return nil
 		}
-		geoipmap, err := walkINIFile(path)
+		geoipmap, err := WalkTOMLFile(path)
 		if err != nil {
 			log.Printf("failed to walk INI file: %v", err)
 			return nil
@@ -180,7 +224,7 @@ func NewCachedGeoIPMapWrapper(expiry time.Duration, root string) *CachedGeoIPMap
 }
 
 func (cache *CachedGeoIPMapWrapper) refreshCache() (*pkgutils.RouteTable, time.Time, error) {
-	geoipmap, err := IndexINIGeoIP(cache.Root)
+	geoipmap, err := IndexTOMLGeoIP(cache.Root)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("failed to index INI GeoIP: %v", err)
 	}
