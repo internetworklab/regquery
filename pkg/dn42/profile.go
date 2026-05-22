@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -72,19 +73,30 @@ func ParseProfile(path string) (*Profile, error) {
 	}
 	defer file.Close()
 
+	pattern := regexp.MustCompile(`^([\w\d-_]+):\s*(.+)`)
+	contPattern := regexp.MustCompile(`^[ \t+](.+)`)
+
+	var lastKey string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
-		pattern := regexp.MustCompile(`^([\w\d-_]+):\s*(.+)`)
+
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+
 		matches := pattern.FindStringSubmatch(line)
 		if len(matches) >= 3 {
-			group1 := matches[1]
-			group2 := matches[2]
+			lastKey = matches[1]
+			result.data[lastKey] = append(result.data[lastKey], matches[2])
+			continue
+		}
 
-			if _, ok := result.data[group1]; !ok {
-				result.data[group1] = make([]string, 0)
+		// RPSL continuation: line starts with space, tab, or '+'
+		if contMatches := contPattern.FindStringSubmatch(line); len(contMatches) >= 2 && lastKey != "" {
+			if contContent := strings.TrimSpace(contMatches[1]); contContent != "" {
+				result.data[lastKey] = append(result.data[lastKey], contContent)
 			}
-			result.data[group1] = append(result.data[group1], group2)
 		}
 	}
 
